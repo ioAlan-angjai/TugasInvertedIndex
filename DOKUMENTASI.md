@@ -6,14 +6,14 @@ Dokumen ini menjelaskan secara rinci arsitektur sistem, alur pemrosesan data, al
 
 ## 1. Gambaran Umum & Arsitektur Sistem
 
-Project **UTS2-PI** adalah implementasi **Inverted Index** berbasis **Java murni** (*pure Java*, tanpa dependensi library eksternal) untuk melakukan pengindeksan dan pencarian teks pada koleksi 12 dokumen berita berbahasa Indonesia (`doc1.txt` sampai `doc12.txt` di folder `UTS2-PI/Koleksi/`).
+Project **UTS2-PI** adalah implementasi **Inverted Index** menggunakan **Apache Lucene** sebagai library stemming untuk melakukan pengindeksan dan pencarian teks pada koleksi 12 dokumen berita berbahasa Indonesia (`doc1.txt` sampai `doc12.txt` di folder `UTS2-PI/Koleksi/`).
 
 ### Alur Kerja Sistem (Pipeline)
 
 ```mermaid
 flowchart LR
     A["Koleksi Dokumen<br>(doc1.txt - doc12.txt)"] --> B["ReadFileToken<br>(Baca baris UTF-8)"]
-    B --> C["TextPreprocessor<br>1. Lowercase<br>2. Pisah token [^a-z0-9]+<br>3. Stopword Removal<br>4. Stemming Nazief-Adriani"]
+    B --> C["TextPreprocessor<br>1. Lowercase<br>2. Pisah token [^a-z0-9]+<br>3. Stopword Removal<br>4. Stemming Lucene ECS"]
     C --> D["InvertedIndexBasic<br>Dictionary (Term) &<br>Posting List (Document)"]
     Q["Query Pengguna<br>(Scanner System.in)"] --> C2["TextPreprocessor<br>(Pipeline Identik)"]
     C2 --> E["searchTerm & intersect<br>(Boolean AND Two-Pointer)"]
@@ -28,8 +28,8 @@ flowchart LR
 | `main` | `MainInvertedIndexBasic` | Titik masuk (`main`), memicu pengindeksan, mencetak isi index, dan menerima input query dari pengguna. |
 | `test` | `ReadFileToken` | Membaca setiap file teks di direktori koleksi, mengirim tiap baris ke `TextPreprocessor`, lalu memasukkan token bersih ke `InvertedIndexBasic`. |
 | `test` | `TextPreprocessor` | Menggabungkan seluruh tahap pra-pemrosesan teks (case-folding, pemisahan token, stopword removal, stemming) dalam satu pintu. |
-| `test` | `Stopwords` | Menyimpan daftar kata umum (stopword) Bahasa Indonesia dalam `HashSet` read-only untuk penyaringan cepat. |
-| `test` | `IndonesianStemmer` | Mengubah kata berimbuhan Bahasa Indonesia menjadi kata dasar menggunakan algoritma **Nazief–Adriani** + kamus kata dasar bawaan. |
+| `test` | `Stopwords` | Memuat daftar stopword Bahasa Indonesia bawaan **Apache Lucene** (`/org/apache/lucene/analysis/id/stopwords.txt`) ke `HashSet` read-only untuk penyaringan cepat. |
+| `test` | `IndonesianStemmer` | Mengubah kata berimbuhan Bahasa Indonesia menjadi kata dasar menggunakan algoritma **ECS (Enhanced Confix Stripping)** dari **Apache Lucene** (`lucene-analyzers-common-8.11.2`). |
 | `test` | `InvertedIndexBasic` | Mengelola dictionary (`Term`), posting list (`Document`), serta menjalankan pencarian multi-kata (`searchTerm` + `intersect`). |
 | `test` | `Term` | Menyimpan satu kata unik (`term`) beserta daftar dokumen kemunculannya (`documentList`). |
 | `test` | `Document` | Menyimpan nama file dokumen dan mengimplementasikan `Comparable<Document>` untuk pengurutan alfabetis. |
@@ -93,57 +93,55 @@ Setiap karakter non-alfanumerik (`-`, `/`, `.`, `,`, tanda kutip, dll.) menjadi 
 
 ---
 
-### 2.5 Mengapa Menggunakan Stopword Removal Berbasis `HashSet`?
+### 2.5 Mengapa Menggunakan Stopword Removal Berbasis Lucene & `HashSet`?
 
 **Stopword** adalah kata-kata fungsi berfrekuensi sangat tinggi yang tidak membawa topik spesifik dokumen (misalnya `di`, `ke`, `dari`, `yang`, `dan`, `atau`, `adalah`, `akan`, `ini`, `itu`).
 
 **Alasan teknis:**
-1. **Memperkecil ukuran dictionary & mempercepat index**: Dari 1.489 token unik mentah pada koleksi, penyaringan stopword + stemming merampingkan dictionary menjadi **1.088 term unik**.
-2. **Mengapa menggunakan `HashSet`?**
+1. **Menggunakan daftar resmi Apache Lucene tanpa ketik manual**:
+   `Stopwords.java` membaca langsung file `org/apache/lucene/analysis/id/stopwords.txt` yang sudah tertanam di dalam JAR `lucene-analyzers-common-8.11.2 (1).jar` menggunakan `getResourceAsStream(...)`, sehingga menghasilkan **355 stopword unik** tanpa perlu mengetik manual dan tanpa membutuhkan `lucene-core.jar` (yang diperlukan jika memanggil `IndonesianAnalyzer.getDefaultStopSet()`).
+2. **Memperkecil ukuran dictionary & mempercepat index**: Penyaringan stopword + stemming Lucene menghasilkan **1.152 term unik** di dictionary pada koleksi 12 dokumen.
+3. **Mengapa menggunakan `HashSet`?**
    - Pengecekan `STOPWORDS.contains(token)` pada `HashSet` memiliki kompleksitas waktu rata-rata **$O(1)$**, jauh lebih cepat dibanding mencocokkan elemen pada `Array`/`List` yang membutuhkan $O(n)$.
    - Dibungkus dengan `Collections.unmodifiableSet(...)` agar daftar bersifat *immutable* (aman dari perubahan tak sengaja).
-3. **Kurasi daftar stopword yang tepat untuk korpus berita**:
-   - Kata fungsi dan kata kutipan berita yang sangat umum (`kata`, `katanya`, `ujar`, `menurut`) ikut disaring.
-   - Sebaliknya, kata konten penting seperti `tahun`, `baru`, `malam`, `hari`, `kota`, `jalan`, `warga`, `polisi` **sengaja dipertahankan** karena merupakan kata kunci pencarian yang valid pada berita perayaan tahun baru.
 
 ---
 
-### 2.6 Mengapa Menggunakan Algoritma Stemming Nazief–Adriani (Java Murni)?
+### 2.6 Mengapa Menggunakan Apache Lucene IndonesianStemmer?
 
-#### Mengapa tidak menggunakan Porter Stemmer atau pemotongan imbuhan sederhana?
-- **Porter Stemmer** dirancang untuk morfologi Bahasa Inggris (hanya mengenal sufiks seperti `-ing`, `-ed`, `-ly`). Bahasa Indonesia memiliki struktur afiksasi yang jauh lebih kompleks: **prefiks** (`me-`, `pe-`, `ber-`, `ter-`, `di-`, `ke-`, `se-`), **sufiks** (`-kan`, `-i`, `-an`), **partikel/posesif** (`-lah`, `-kah`, `-nya`, `-ku`, `-mu`), serta **konfiks/imbuhan gabung** (`per-...-an`, `ke-...-an`, `me-...-kan`, `di-per-...-kan`).
-- **Pemotongan naif tanpa kamus** sangat berbahaya bagi Bahasa Indonesia karena banyak kata dasar yang berawalan atau berakhiran mirip imbuhan (*over-stemming*). Contoh nyata dari koleksi project ini:
-  - `semarang` $\to$ diawali `se-`, tanpa kamus akan salah dipotong menjadi `marang`.
-  - `terompet` $\to$ diawali `ter-`, tanpa kamus akan salah dipotong menjadi `ompet`.
-  - `beringin` $\to$ diawali `ber-`, tanpa kamus akan salah dipotong menjadi `ingin`.
-  - `diponegoro`, `direktur`, `distributor` $\to$ diawali `di-`, tanpa kamus akan salah dipotong menjadi `ponegoro`, `rektur`, `stributor`.
+Dosen mengajarkan penggunaan **Apache Lucene** sebagai library text analysis standar industri. Lucene dipakai di berbagai mesin pencari (Elasticsearch, Solr). Stemmer bawaannya untuk Bahasa Indonesia mengimplementasikan algoritma **ECS (Enhanced Confix Stripping)** — algoritma yang sama dengan Nazief–Adriani yang dikembangkan khusus untuk morfologi Bahasa Indonesia.
 
-#### Mengapa Nazief–Adriani (*Enhanced Confix Stripping*)?
-Algoritma **Nazief–Adriani** menyelesaikan masalah morfologi Bahasa Indonesia secara sistematis melalui langkah-langkah berikut pada `IndonesianStemmer.java`:
+#### Keunggulan Lucene dibanding Implementasi Manual
 
-1. **Pengecekan Kamus Kata Dasar (`ROOT_WORDS`)**:
-   Jika kata sudah ada di `ROOT_WORDS`, proses langsung berhenti sehingga kata dasar seperti `semarang`, `terompet`, `beringin`, `mercon`, `kembang`, `petasan`, `halaman` tidak pernah rusak.
-2. **Penghapusan Akhiran Infleksional (`stripInflectionalSuffixes`)**:
-   Menghapus partikel (`-lah`, `-kah`, `-tah`, `-pun`) dan kata ganti milik (`-ku`, `-mu`, `-nya`) terlebih dahulu, misalnya `ditemukanlah` $\to$ `ditemukan`, `menyambutnya` $\to$ `menyambut`.
-3. **Strategi Prioritas Awalan vs Konfiks (`stemCandidate`)**:
-   - **Langkah A (hapus awalan saja terlebih dahulu)**: Menangani kata seperti `berjalan` $\to$ `jalan` atau `melawan` $\to$ `lawan` agar akhiran `-an` yang sebenarnya bagian dari kata dasar tidak ikut terpotong.
-   - **Langkah B (hapus akhiran derivasional `-kan`/`-i`/`-an`, lalu awalan)**: Menangani kata berkonfiks seperti `perayaan` (`per-` + `raya` + `-an` $\to$ `raya`) atau `menyalakan` (`me-` + `nyala` + `-kan` $\to$ `nyala`).
-4. **Aturan Kombinasi Awalan–Akhiran Terlarang (*Disallowed Affix Pairs*)**:
-   Di `generatePrefixCandidates`, kombinasi yang tidak valid secara tata bahasa Indonesia langsung ditolak, antara lain:
-   - `be-` tidak boleh berpasangan dengan `-i`
-   - `di-`, `me-`, `te-` tidak boleh berpasangan dengan `-an`
-   - `ke-`, `se-` tidak boleh berpasangan dengan `-i` atau `-kan`
-   - `pe-` tidak boleh berpasangan dengan `-kan` (sehingga kata seperti `penumpukan` diproses sebagai `pen-` + `tumpuk` + `-an` $\to$ `tumpuk`, bukan `tumpu`).
-5. **Aturan Peluluhan Konsonan (*Recoding*)**:
-   Pada prefiks `meN-` dan `peN-`, huruf awal kata dasar `k, p, t, s` luluh ketika bertemu awalan. Stemmer mencoba varian tanpa recoding maupun dengan recoding:
-   - `meng-` $\to$ `k` (`mengendarai` $\to$ `kendara`, `pengendara` $\to$ `kendara`)
-   - `meny-` $\to$ `s` (`menyambut` $\to$ `sambut`, `penyambutan` $\to$ `sambut`, `menyemut` $\to$ `semut`)
-   - `men-` $\to$ `t` (`menari` $\to$ `tari`, `penonton` $\to$ `tonton`, `menangkap` $\to$ `tangkap`)
-   - `mem-` $\to$ `p` (`memakai` $\to$ `pakai`, `pemadam` $\to$ `padam`, `memadati` $\to$ `padat`)
-6. **Penghapusan Awalan Berlapis hingga 3 Tingkat (`stripPrefixesWithDictRecursive`)**:
-   Menangani kata dengan awalan bertingkat seperti `diperbolehkan` (`di-` + `per-` + `boleh` + `-kan` $\to$ `boleh`) atau `berkesudahan` (`ber-` + `ke-` + `sudah` + `-an` $\to$ `sudah`).
-7. **Fallback Konservatif (`fallbackRuleBasedStem`)**:
-   Jika kata belum terdaftar di `ROOT_WORDS` (misalnya kosakata baru saat pencarian), hanya imbuhan yang paling tidak ambigu (`meng-`, `meny-`, `men-`, `mem-`, `ber-`, `ter-`, `di-`, `-kan`) yang dipotong dengan syarat sisa kata minimal 3 huruf dan memiliki minimal 2 huruf vokal.
+| Aspek | Implementasi Manual (lama) | Apache Lucene (sekarang) |
+|:---|:---|:---|
+| Kamus kata dasar | Hardcode ratusan kata di `ROOT_WORDS` | Sudah tertanam di dalam library |
+| Pemeliharaan | Harus update kode jika ada kata baru | Dikelola oleh komunitas Apache |
+| Akurasi | Terbatas pada kamus yang diketik | Mencakup morfologi standar BI |
+| Integrasi | Tidak perlu JAR eksternal | Tambahkan `lucene-analyzers-common-8.11.2 (1).jar` ke classpath |
+
+#### Cara Penggunaan Lucene IndonesianStemmer
+
+Lucene menyediakan class `org.apache.lucene.analysis.id.IndonesianStemmer` dengan API langsung berbasis `char[]`:
+
+```java
+// Lucene IndonesianStemmer bekerja in-place pada char[]
+org.apache.lucene.analysis.id.IndonesianStemmer s = new org.apache.lucene.analysis.id.IndonesianStemmer();
+char[] chars = "ditangkap".toCharArray();
+int newLen = s.stem(chars, chars.length, true); // true = stem imbuhan derivasional
+String hasil = new String(chars, 0, newLen); // → "tangkap"
+```
+
+Wrapper `IndonesianStemmer.java` pada project ini menggunakan `ThreadLocal` agar instance stemmer aman digunakan dari berbagai thread tanpa overhead pembuatan objek baru:
+
+```java
+private static final ThreadLocal<org.apache.lucene.analysis.id.IndonesianStemmer> stemmerLocal =
+    ThreadLocal.withInitial(org.apache.lucene.analysis.id.IndonesianStemmer::new);
+```
+
+#### Menambahkan Lucene ke NetBeans
+
+Klik kanan project → **Properties** → **Libraries** → **Add JAR/Folder** → pilih `lib/lucene-analyzers-common-8.11.2 (1).jar`
 
 ---
 
@@ -154,7 +152,7 @@ Salah satu kesalahan paling umum pada sistem *Information Retrieval* adalah hany
 **Dampaknya jika tidak simetris:**
 - Jika query `"perayaan di kota semarang"` tidak melalui `TextPreprocessor`:
   1. `"di"` dianggap kata kunci wajib; karena `"di"` sudah dibuang dari index saat indexing, pencarian mengembalikan **kosong**.
-  2. `"perayaan"` tidak diubah menjadi `"raya"`, sehingga gagal cocok dengan entri `"raya"` di dictionary.
+  2. `"perayaan"` tidak diubah menjadi `"aya"`, sehingga gagal cocok dengan entri `"aya"` di dictionary.
 
 Dengan memusatkan seluruh logika pada `TextPreprocessor.preprocess(String)` yang dipanggil oleh **keduanya** (`ReadFileToken.readDocuments` dan `InvertedIndexBasic.searchTerm`), dokumen dan query selalu berada dalam ruang representasi term yang sama.
 
@@ -170,16 +168,18 @@ Bagian ini merangkum sintaks penting yang ada di kode sumber bagi pembaca yang i
    Kontrak standar Java untuk menentukan urutan alami antar-objek. Mengembalikan `< 0` jika objek ini lebih kecil, `0` jika sama, dan `> 0` jika lebih besar. Dipakai oleh `LinkedListOrderedUnique` dan `intersect`.
 2. **`ListIterator<E>`** (`LinkedListOrderedUnique.java`, `InvertedIndexBasic.java`):
    Iterator dua arah milik `LinkedList`. Berbeda dengan `Iterator` biasa, `ListIterator` memiliki method `previous()` dan `add(E)` sehingga `addSort` dapat mundur satu langkah lalu menyisipkan elemen di tengah list secara langsung.
-3. **`static { ... }` (*Static Initializer Block*)** (`Stopwords.java`, `IndonesianStemmer.java`):
-   Blok kode yang dieksekusi **hanya satu kali** oleh JVM saat kelas pertama kali dimuat ke memori. Cocok untuk mengisi `Set<String>` kamus kata dasar dan stopword agar tidak dibangun ulang setiap kali method `stem()` atau `isStopword()` dipanggil.
-4. **`Collections.unmodifiableSet(words)`**:
-   Membungkus `HashSet` menjadi himpunan *read-only* sehingga pemanggil method `getAll()` atau `getRootWords()` tidak bisa menambah/menghapus isi kamus secara tidak sengaja.
-5. **Regex `[^a-z0-9]+` dan `\\s+`** (`TextPreprocessor.java`):
+3. **`ThreadLocal<T>`** (`IndonesianStemmer.java`):
+   Menyimpan satu instance per thread secara otomatis. Karena `org.apache.lucene.analysis.id.IndonesianStemmer` tidak *thread-safe* (memodifikasi `char[]` secara in-place), `ThreadLocal.withInitial(...)` memastikan setiap thread mendapatkan instance sendiri tanpa overhead `synchronized`.
+4. **`static { ... }` (*Static Initializer Block*)** (`Stopwords.java`):
+   Blok kode yang dieksekusi **hanya satu kali** oleh JVM saat kelas pertama kali dimuat ke memori. Cocok untuk membaca `stopwords.txt` dari JAR Lucene dan mengisi `Set<String>` sekali saja agar tidak membaca ulang I/O setiap kali `isStopword()` dipanggil.
+5. **`Collections.unmodifiableSet(words)`**:
+   Membungkus `HashSet` menjadi himpunan *read-only* sehingga pemanggil method `getAll()` tidak bisa menambah/menghapus isi daftar stopword secara tidak sengaja.
+6. **Regex `[^a-z0-9]+` dan `\\s+`** (`TextPreprocessor.java`):
    - `[^a-z0-9]+`: mencocokkan satu atau lebih karakter yang **bukan** huruf kecil `a-z` maupun angka `0-9`.
    - `\\s+`: mencocokkan satu atau lebih karakter spasi/tab/newline untuk memecah kalimat menjadi array kata (`split`).
-6. **`new Scanner(file, "UTF-8")`** (`ReadFileToken.java`):
+7. **`new Scanner(file, "UTF-8")`** (`ReadFileToken.java`):
    Membaca file teks dengan encoding UTF-8 secara eksplisit agar pembacaan karakter konsisten di berbagai sistem operasi (Windows/Linux) dan sesuai dengan konfigurasi `source.encoding=UTF-8` proyek.
-7. **`private` Constructor pada Utility Class** (`Stopwords`, `IndonesianStemmer`, `TextPreprocessor`):
+8. **`private` Constructor pada Utility Class** (`Stopwords`, `IndonesianStemmer`, `TextPreprocessor`):
    Mencegah kelas utilitas yang hanya berisi method `static` diinstansiasi dengan `new ...()`.
 
 ---
@@ -189,19 +189,21 @@ Bagian ini merangkum sintaks penting yang ada di kode sumber bagi pembaca yang i
 ### Kompilasi & Eksekusi via Terminal (PowerShell)
 
 ```powershell
-# 1. Kompilasi seluruh file sumber ke build\classes
-javac -encoding UTF-8 --release 23 -d "UTS2-PI\UTS2-PI\build\classes" (Get-ChildItem "UTS2-PI\UTS2-PI\src\*.java" -Recurse | ForEach-Object { $_.FullName })
+# 1. Kompilasi (Lucene JAR harus ada di classpath)
+$lib = "UTS2-PI\UTS2-PI\lib\lucene-analyzers-common-8.11.2 (1).jar"
+$src = Get-ChildItem "UTS2-PI\UTS2-PI\src" -Recurse -Filter "*.java" | ForEach-Object { $_.FullName }
+& "C:\Program Files\Java\jdk-24\bin\javac.exe" -encoding UTF-8 --release 23 -cp $lib -d "UTS2-PI\UTS2-PI\build\classes" @src
 
-# 2. Jalankan program dari direktori proyek NetBeans agar path "..\Koleksi" valid
+# 2. Jalankan dari direktori proyek agar path "..\Koleksi" valid
 cd UTS2-PI\UTS2-PI
-java -cp "build\classes" main.MainInvertedIndexBasic
+java -cp "build\classes;lib\lucene-analyzers-common-8.11.2 (1).jar" main.MainInvertedIndexBasic
 ```
 
 ### Contoh Kasus Uji
 
 | Input Query | Token Setelah Preprocessing | Hasil Dokumen |
 | :--- | :--- | :--- |
-| `perayaan di kota semarang` | `["raya", "kota", "semarang"]` | `doc1.txt doc4.txt doc6.txt` |
+| `perayaan di kota semarang` | `["aya", "kota", "semarang"]` | `doc1.txt doc4.txt` |
 | `jalan-jalan yang macet` | `["jalan", "jalan", "macet"]` | `doc1.txt doc9.txt` |
-| `pengendara motor ditangkap polisi` | `["kendara", "motor", "tangkap", "polisi"]` | `doc2.txt` |
+| `pengendara motor ditangkap polisi` | `["endara", "motor", "tangkap", "polisi"]` | `doc2.txt` |
 | `di dan yang` | `[]` *(semua tersaring stopword)* | `Keyword tidak ditemukan !` |
