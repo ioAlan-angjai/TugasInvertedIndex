@@ -9,36 +9,40 @@ import test.Document;
 import test.LinkedListOrderedUnique;
 import test.ReadFileToken;
 /**
+ * Kelas utama (entry point) aplikasi Inverted Index dan pencarian dokumen.
  *
  * @author RACHEL RAMBU
  */
 public class MainInvertedIndexBasic {
     /**
-     * @param args the command line arguments
+     * Titik masuk program: membaca koleksi dokumen, membangun inverted index,
+     * menampilkannya ke konsol, lalu menerima input kata kunci pencarian dari pengguna.
+     *
+     * @param args argumen baris perintah (tidak digunakan)
      */
     public static void main(String[] args) {
-        // Membaca dokumen dan membangun Inverted Index
+        // Membaca dokumen dan membangun Inverted Index dari folder koleksi relatif proyek
         ReadFileToken reader = new ReadFileToken();
         InvertedIndexBasic cobaList = reader.readDocuments("..\\Koleksi");
 
-        // Menampilkan Inverted Index
+        // Menampilkan seluruh isi Inverted Index (term => daftar dokumen)
         System.out.println("\n===== INVERTED INDEX =====");
         System.out.println(cobaList);
 
-        // Searching
+        // Searching: membaca satu baris keyword dari input standar (keyboard)
         Scanner search = new Scanner(System.in);
 
         System.out.println("\n===== SEARCHING =====");
         System.out.print("Masukkan keyword: ");
 
         String keyword = search.nextLine();
+        // Memanggil searchTerm yang otomatis melakukan normalisasi, stopword removal, dan stemming
         LinkedListOrderedUnique<Document> hasil = cobaList.searchTerm(keyword);
         System.out.println("\nHasil pencarian:");
-        if(hasil.isEmpty()){
+        if (hasil.isEmpty()) {
             System.out.println("Keyword tidak ditemukan !");
-        }else {
+        } else {
             System.out.println(hasil);
         }
-        
     }
 }
